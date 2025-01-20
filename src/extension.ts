@@ -82,6 +82,9 @@ async function unregisterInstance() {
         unlinkSync(lockFilePath); // Удаляем lock файл
         res(true);
       } else {
+        if (updatedInstances.length === 1) {
+          updatedInstances.push("");
+        }
         // Обновляем lock файл, удаляя текущий PID
         writeFileSync(lockFilePath, updatedInstances.join("\n"));
         res(true);
