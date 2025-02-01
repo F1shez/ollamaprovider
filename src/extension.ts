@@ -1,127 +1,138 @@
-// The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import { exec } from "child_process";
-import {
-  appendFileSync,
-  existsSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import path from "path";
 import * as vscode from "vscode";
 
-const tempDir =
-  process.env.TEMP ||
-  process.env.TMP ||
-  "C:\\Users\\veret\\AppData\\Local\\Temp\\";
-
+const tempDir = process.env.TEMP || process.env.TMP || "C:\\Windows\\Temp\\";
 const lockFilePath = path.join(tempDir, "ollamaprovider.lock");
 
-function registerInstance() {
+// Проверяет, существует ли процесс с указанным PID
+function checkPidExists(pid: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    exec(`tasklist /FI "PID eq ${pid}"`, (error, stdout) => {
+      if (error) {
+        resolve(false);
+        return;
+      }
+      const exists = stdout.includes(`${pid.toString()}`);
+      resolve(exists);
+    });
+  });
+}
+
+// Удаляет неактивные PID из lock-файла и останавливает ollama при необходимости
+async function cleanupStalePids() {
+  if (!existsSync(lockFilePath)) return;
+
   try {
-    // Проверяем существует ли файл
-    if (!existsSync(lockFilePath)) {
-      // Если нет, создаем его и записываем PID текущего процесса
-      writeFileSync(lockFilePath, `${process.pid}\n`);
+    const pids = readFileSync(lockFilePath, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((pid) => parseInt(pid, 10));
+
+    const activePids = [];
+    for (const pid of pids) {
+      if (await checkPidExists(pid)) {
+        activePids.push(pid);
+      } else {
+        console.log(`Удаление неактивного PID: ${pid}`);
+      }
+    }
+
+    if (activePids.length === 0) {
+      console.log("Все процессы завершены, остановка Ollama.");
+      exec("taskkill /F /IM ollama.exe");
+      exec("taskkill /F /IM ollama_llama_server.exe");
+      unlinkSync(lockFilePath);
     } else {
-      // Если файл существует, добавляем PID текущего процесса
-      appendFileSync(lockFilePath, `${process.pid}\n`);
+      writeFileSync(lockFilePath, activePids.join("\n") + "\n");
     }
   } catch (err) {
-    console.error("Ошибка при регистрации экземпляра:", err);
+    console.error("Ошибка при очистке PID:", err);
   }
 }
 
-async function checkRunningOllama() {
-  return new Promise((res, rej) => {
-    exec('tasklist | findstr /i "ollama.exe"', (error, stdout, stderr) => {
-      if (error) {
-        console.error(`Error executing command: ${error.message}`);
-        // rej(error);
-        res(false);
-        return;
-      }
-      if (stderr) {
-        console.error(`Command execution resulted in error: ${stderr}`);
-        res(false);
-        // rej(stderr);
-        return;
+// Регистрирует текущий экземпляр VS Code
+function registerInstance() {
+  try {
+    cleanupStalePids().then(() => {
+      const currentPid = process.pid;
+      let pids: number[] = [];
+
+      if (existsSync(lockFilePath)) {
+        pids = readFileSync(lockFilePath, "utf-8")
+          .split("\n")
+          .filter(Boolean)
+          .map((pid) => parseInt(pid, 10));
       }
 
-      // stdout contains the output of the command
-      if (stdout.trim() === "") {
-        console.log("ollama.exe is not running.");
-        res(false);
-      } else {
-        console.log("ollama.exe is running:");
-        console.log(stdout);
-        res(true);
+      if (!pids.includes(currentPid)) {
+        pids.push(currentPid);
+        writeFileSync(lockFilePath, pids.join("\n") + "\n");
       }
+    });
+  } catch (err) {
+    console.error("Ошибка регистрации:", err);
+  }
+}
+
+// Проверяет, запущен ли процесс ollama
+async function checkRunningOllama(): Promise<boolean> {
+  return new Promise((resolve) => {
+    exec('tasklist | findstr /i "ollama.exe"', (error, stdout) => {
+      resolve(stdout.trim() !== "");
     });
   });
 }
 
+// Удаляет текущий PID из lock-файла
 async function unregisterInstance() {
-  return new Promise((res, rej) => {
-    try {
-      // Читаем lock файл
-      const instances = readFileSync(lockFilePath, "utf-8")
-        .split("\n")
-        .filter(Boolean);
-      const updatedInstances = instances.filter(
-        (pid) => pid !== String(process.pid)
-      );
+  try {
+    if (!existsSync(lockFilePath)) return;
 
-      if (updatedInstances.length === 0) {
-        // Если после удаления текущего экземпляра в файле ничего не осталось, это последний экземпляр
-        console.log("Это был последний экземпляр Node.js.");
-        exec("taskkill /F /IM ollama.exe");
-        exec("taskkill /F /IM ollama_llama_server.exe");
-        vscode.window.showInformationMessage("Ollama app stopped!");
-        unlinkSync(lockFilePath); // Удаляем lock файл
-        res(true);
-      } else {
-        if (updatedInstances.length === 1) {
-          updatedInstances.push("");
-        }
-        // Обновляем lock файл, удаляя текущий PID
-        writeFileSync(lockFilePath, updatedInstances.join("\n"));
-        res(true);
-      }
-    } catch (err) {
-      console.error("Ошибка при удалении экземпляра:", err);
-      rej(err);
+    const pids = readFileSync(lockFilePath, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((pid) => parseInt(pid, 10));
+
+    const updatedPids = pids.filter((pid) => pid !== process.pid);
+
+    if (updatedPids.length === 0) {
+      unlinkSync(lockFilePath);
+      exec("taskkill /F /IM ollama.exe");
+      exec("taskkill /F /IM ollama_llama_server.exe");
+    } else {
+      writeFileSync(lockFilePath, updatedPids.join("\n") + "\n");
     }
-  });
+  } catch (err) {
+    console.error("Ошибка при удалении PID:", err);
+  }
 }
 
-// This method is called when your extension is activated
-// Your extension is activated the very first time the command is executed
+// Активация расширения
 export async function activate(context: vscode.ExtensionContext) {
   vscode.window.showInformationMessage("Ollama extension activated!");
-  try {
-    registerInstance();
-    checkRunningOllama().then((isRunning) => {
-      if (!isRunning) {
-        exec("ollama serve");
-        vscode.window.showInformationMessage(
-          "Ollama app started successfully!"
-        );
+
+  // Запуск периодической очистки каждые 30 секунд
+  const interval = setInterval(cleanupStalePids, 30000);
+  context.subscriptions.push({ dispose: () => clearInterval(interval) });
+
+  await cleanupStalePids();
+  registerInstance();
+
+  if (!(await checkRunningOllama())) {
+    exec("start /B ollama serve", (err) => {
+      if (err) {
+        vscode.window.showErrorMessage("Ошибка запуска Ollama: " + err.message);
+      } else {
+        vscode.window.showInformationMessage("Ollama успешно запущен!");
       }
     });
-  } catch (error) {
-    vscode.window.showErrorMessage(`Failed to start Ollama app: ${error}`);
   }
 }
 
-// This method is called when your extension is deactivated
+// Деактивация расширения
 export async function deactivate() {
-  try {
-    await unregisterInstance();
-  } catch (error) {
-    vscode.window.showErrorMessage(
-      `Failed to stop Ollama app: ${(error as any).message}`
-    );
-  }
+  await unregisterInstance();
+  await cleanupStalePids();
 }
